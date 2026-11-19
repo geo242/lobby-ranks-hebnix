@@ -1,6 +1,6 @@
 # Lobby Ranks for Hebnix
 
-A Hebnix Lua port of [GrantJL's BakkesMod Lobby Ranks](https://github.com/GrantJL/rl-lobby-ranks).
+A Hebnix plugin inspired by [GrantJL's BakkesMod Lobby Ranks](https://github.com/GrantJL/rl-lobby-ranks).
 It shows a table of every player in your match, with their rank, MMR and games played across the playlists you pick.
 It works in online matches with Easy Anti-Cheat because it only uses the Stats API, tracker profiles and an overlay.
 
@@ -13,9 +13,9 @@ The Rocket League Stats API must be enabled. Hebnix can do this for you.
 
 - **Hold scoreboard:** the table shows while your scoreboard bind is held. You can turn this off in settings.
 - **Toggle key:** in settings, click **Set** next to "Toggle key" and press a key or controller button. This replaces `jlg_lobby_rank_toggle`.
-- **Preview:** "Show preview table" draws example players so you can position and colour the table outside a match.
+- **Preview:** "Show preview table" draws example players so you can position and color the table outside a match.
 
-## Mapping from the BakkesMod version
+## Compared with the BakkesMod plugin
 
 | BakkesMod | Hebnix |
 |---|---|
@@ -27,7 +27,7 @@ The Rocket League Stats API must be enabled. Hebnix can do this for you.
 
 ## Credits
 
-The original BakkesMod Lobby Ranks is by [GrantJL (Jayden Grant)](https://github.com/GrantJL/rl-lobby-ranks). This is an independent Lua rewrite for Hebnix that follows the original's design. GrantJL has been contacted about the port through a GitHub issue on the original repo. If they object, it will be taken down.
+Written by Geoff Tripoli. Inspired by the BakkesMod plugin [Lobby Ranks](https://github.com/GrantJL/rl-lobby-ranks) by GrantJL (Jayden Grant), whose table design it follows with his permission.
 
 ## Development
 
@@ -44,7 +44,11 @@ The original BakkesMod Lobby Ranks is by [GrantJL (Jayden Grant)](https://github
   This writes `listing/banner.png`. The portal listing text is in `listing/listing.md`.
 - **Release a new version:** bump `version` in `plugin.toml` for each upload. After the first upload, add the `plugin_id` the Hebnix portal assigns to `plugin.toml`. Hebnix uses that ID to match updates.
 
-Differences from the original:
+Differences from the BakkesMod plugin:
 - Ranks come from tracker profiles rather than the game's memory, so new players show `...` for a moment while their profiles load.
 - `?` means the lookup failed.
-- Playlists are shown in a fixed order. The original let you reorder them.
+- Playlists are shown in a fixed order. The BakkesMod plugin let you reorder them.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

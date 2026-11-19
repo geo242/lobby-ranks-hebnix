@@ -4,11 +4,19 @@ local now = 0
 local draws = {}
 local scoreboard = false
 local bind_down = false
-local calls = { measure = 0, stats = {} }
+local calls = { measure = 0, stats = {}, fetch = {} }
+local logs = {}
+local RANKS = { ranks = {
+    [10] = { playlist_id = 10, tier_id = 13, division_id = 2, mmr = 1003.4, matches_played = 120 },
+    [11] = { playlist_id = 11, tier_id = 22, division_id = 0, mmr = 1901, matches_played = 900 },
+    ["34"] = { playlist_id = 34, tier_id = 0, division_id = 0, mmr = 600, matches_played = 0 },
+    [0] = { playlist_id = 0, tier_id = 0, division_id = 0, mmr = 812, matches_played = 3000 },
+} }
+local psn_result = { error = "profile service returned HTTP 503" }
 
 hebnix = {
     rl_connected = function() return true end,
-    log = function(...) print("[log]", ...) end,
+    log = function(text) table.insert(logs, text); print("[log]", text) end,
     get_bool = function(k, d) local v = store[k]; if type(v) == "boolean" then return v end; return d == nil and false or d end,
     get_string = function(k, d) local v = store[k]; if type(v) == "string" then return v end; return d or "" end,
     get_number = function(k, d) local v = store[k]; if type(v) == "number" then return v end; return d or 0 end,
@@ -22,19 +30,18 @@ hebnix = {
     capture_bind_result = function() return "done", "f3" end,
     parse_launch_log_async = function() return "logkey" end,
     launch_log_result = function() return { session = { primary_id = "Steam|111|0" } } end,
-    fetch_profile_async = function(platform, account) return platform .. ":" .. account end,
+    fetch_profile_async = function(platform, account)
+        local key = platform .. ":" .. account
+        calls.fetch[key] = (calls.fetch[key] or 0) + 1
+        return key
+    end,
     fetch_stats_async = function() return true end,
     clear_stats_cache = function() end,
     stats_result = function(key)
         calls.stats[key] = (calls.stats[key] or 0) + 1
         if key == "epic:222" then return "pending" end
-        if key == "psn:333" then return { error = "boom" } end
-        return { ranks = {
-            [10] = { playlist_id = 10, tier_id = 13, division_id = 2, mmr = 1003.4, matches_played = 120 },
-            [11] = { playlist_id = 11, tier_id = 22, division_id = 0, mmr = 1901, matches_played = 900 },
-            ["34"] = { playlist_id = 34, tier_id = 0, division_id = 0, mmr = 600, matches_played = 0 },
-            [0] = { playlist_id = 0, tier_id = 0, division_id = 0, mmr = 812, matches_played = 3000 },
-        } }
+        if key == "psn:333" then return psn_result end
+        return RANKS
     end,
 }
 
@@ -96,14 +103,15 @@ assert(joined:find("D1 D3"), "rank text missing")
 assert(joined:find("SSL"), "SSL missing")
 assert(joined:find("1003"), "mmr missing")
 assert(joined:find("%.%.%."), "pending marker missing")
-assert(joined:find("text %?"), "error marker missing")
+assert(not joined:find("text %?"), "a first failure shown as ? instead of being retried")
 
--- 2b. resolved profiles are not re-read; unchanged frames don't re-measure text
+-- 2b. resolved profiles are not re-read; a failed one isn't polled before its
+-- retry; unchanged frames don't re-measure text
 local steam_reads, psn_reads = calls.stats["steam:111"], calls.stats["psn:333"]
 local measures = calls.measure
 for _ = 1, 3 do assert(#frame() > 0) end
 assert(calls.stats["steam:111"] == steam_reads, "resolved profile polled again")
-assert(calls.stats["psn:333"] == psn_reads, "failed profile polled again")
+assert(calls.stats["psn:333"] == psn_reads, "failed profile polled before its retry")
 assert(calls.measure == measures, "text re-measured without changes")
 
 -- 2c. repeated UpdateState with the same roster is cheap; a player leaving is seen at once
@@ -124,6 +132,56 @@ plugin.on_game_event("UpdateState", { match_guid = "m1", data = { Players = {
 } } })
 d = frame()
 assert(table.concat(d, "\n"):find("Bot A"), "player that joined not shown")
+
+-- 2d. a failing lookup is retried after 20, 40 and 60 s, then shown as "?"
+local function has(text) return table.concat(frame(), "\n"):find(text, 1, true) ~= nil end
+local function wait(seconds) for _ = 1, seconds do frame() end end
+local function any_log(text)
+    for _, line in ipairs(logs) do if line:find(text, 1, true) then return true end end
+    return false
+end
+local fetches = calls.fetch["psn:333"]
+wait(20)
+assert(calls.fetch["psn:333"] == fetches + 1, "first retry not sent after 20 s")
+assert(not has("text ?"), "? shown while retries remain")
+wait(40)
+assert(calls.fetch["psn:333"] == fetches + 2, "second retry not sent after 40 s")
+wait(60)
+assert(calls.fetch["psn:333"] == fetches + 3, "third retry not sent after 60 s")
+wait(2)
+assert(has("text ?"), "? not shown after the retries ran out")
+wait(120)
+assert(calls.fetch["psn:333"] == fetches + 3, "retried after giving up")
+assert(any_log("rank lookup for Psn failed (profile service returned HTTP 503), retrying in 20 s"), "failure reason not logged")
+assert(any_log("giving up for this match"), "giving up not logged")
+
+-- 2e. a lookup that succeeds on a retry shows the rank ("Refresh ranks" starts over)
+local refresh = "Refresh ranks (clear profile cache)"
+psn_result = { error = "profile service request failed: timed out" }
+plugin.on_settings(settings_ui(refresh))
+wait(2)
+assert(not has("text ?"), "refresh didn't start over")
+local function count(text)
+    local n = 0
+    for _, line in ipairs(frame()) do if line:find(text, 1, true) then n = n + 1 end end
+    return n
+end
+assert(count("text 1003") == 1, "only Me should have an MMR before the retry")
+psn_result = RANKS
+wait(20)
+assert(not has("text ?") and count("text 1003") == 2, "rank not shown after a successful retry")
+
+-- 2f. "not found" isn't retried
+psn_result = { error = "NOT_FOUND_404: profile service returned 404", not_found = true }
+plugin.on_settings(settings_ui(refresh))
+fetches = calls.fetch["psn:333"]
+wait(2)
+assert(has("text ?"), "not found not shown as ?")
+wait(100)
+assert(calls.fetch["psn:333"] == fetches, "not found was retried")
+psn_result = RANKS
+plugin.on_settings(settings_ui(refresh))
+wait(2)
 
 -- 3. platform + casual + all playlists, then preview
 store["lr_show_platform"] = true

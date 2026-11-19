@@ -14,7 +14,7 @@ Utility
 
 ## Version
 
-1.0.3
+1.0.4
 
 ## Short description
 
@@ -37,11 +37,14 @@ Settings
 • Preview mode draws example players, so you can set it up from the main menu.
 
 Notes
-• Ranks come from player profile lookups, so a new player shows "..." for a moment while their profile loads. "?" means the lookup failed.
+• Ranks come from player profile lookups, so a new player shows "..." for a moment while their profile loads. "?" means the lookup still failed after a few retries.
 • The Rocket League Stats API must be enabled. Hebnix can do this for you.
 
 Credits
 Written by Geoff Tripoli. Inspired by the BakkesMod plugin Lobby Ranks by GrantJL (Jayden Grant): github.com/GrantJL/rl-lobby-ranks. Its table design is used with his permission.
+
+--- Version 1.0.4 ---
+- When a rank lookup fails (a slow or busy profile service, for example), it's now tried again after 20, 40 and 60 seconds instead of showing "?" for the rest of the match. The reason for each failure is written to the Hebnix console.
 
 --- Version 1.0.3 ---
 - Outside a match (with the preview off), the plugin now does nothing every frame and doesn't keep the game overlay active, so it no longer costs anything in menus.

@@ -1,5 +1,5 @@
 plugin_id = "779d3a3904e16ac2be3db48443b1758b"
 name = "Lobby Ranks"
 author = "Geoff Tripoli"
-version = "1.0.3"
+version = "1.0.4"
 entry = "main.lua"

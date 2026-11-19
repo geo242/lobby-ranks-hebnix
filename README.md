@@ -46,7 +46,7 @@ Written by Geoff Tripoli. Inspired by the BakkesMod plugin [Lobby Ranks](https:/
 
 Differences from the BakkesMod plugin:
 - Ranks come from tracker profiles rather than the game's memory, so new players show `...` for a moment while their profiles load.
-- `?` means the lookup failed.
+- `?` means the lookup failed, and still failed after retries at 20, 40 and 60 seconds. The reason is written to the Hebnix console.
 - Playlists are shown in a fixed order. The BakkesMod plugin let you reorder them.
 
 ## License

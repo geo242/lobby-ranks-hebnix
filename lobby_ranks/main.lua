@@ -10,7 +10,7 @@
 
 local plugin = {}
 
-local VERSION = "1.0.3"
+local VERSION = "1.0.4"
 local P = "lr_" -- settings key prefix
 
 ---------------------------------------------------------------------------
@@ -114,6 +114,11 @@ local preview_cache = {}
 local ROSTER_SCAN_INTERVAL = 0.25 -- UpdateState throttle (seconds)
 local PROFILE_POLL_INTERVAL = 1   -- how often unresolved profiles are polled
 local PROFILE_RETRY_INTERVAL = 5  -- re-request a vanished / never-started profile
+-- A failed lookup (timeout, server error, rejected token...) is tried again
+-- this many seconds after each failure, then shown as "?" for the rest of the
+-- match. Hebnix keeps a finished result, failures included, for 15 s, so a
+-- sooner retry would only read the same failure back. "Not found" isn't retried.
+local PROFILE_FAILURE_RETRY_DELAYS = { 20, 40, 60 }
 local REBUILD_MIN_INTERVAL = 0.1  -- cap rebuilds while settings are being dragged
 local REBUILD_SAFETY_INTERVAL = 5 -- catch setting changes made outside on_settings
 
@@ -204,7 +209,8 @@ end
 -- only polled until the profile resolves. The few fields the table needs are
 -- kept on the entry and stats_result is never called for it again.
 local function resolve_profile(entry)
-    if entry.bot or entry.profile_kind == "ok" or entry.profile_kind == "error" then return end
+    if entry.bot or entry.profile_kind == "ok" or entry.profile_kind == "error"
+        or entry.profile_kind == "retry" then return end
     local kind
     if not entry.request_key then
         kind = "none"
@@ -217,7 +223,20 @@ local function resolve_profile(entry)
         elseif type(result) ~= "table" then
             kind = "missing"
         elseif result.error or result.not_found then
-            kind = "error"
+            local failures = (entry.failures or 0) + 1
+            entry.failures = failures
+            local delay = not result.not_found and PROFILE_FAILURE_RETRY_DELAYS[failures]
+            local reason = tostring(result.error or "not found")
+            if delay then
+                kind = "retry"
+                entry.retry_at = hebnix.monotonic_seconds() + delay
+                hebnix.log(string.format("[Lobby Ranks] rank lookup for %s failed (%s), retrying in %d s",
+                    entry.name or "?", reason, delay))
+            else
+                kind = "error"
+                hebnix.log(string.format("[Lobby Ranks] rank lookup for %s failed (%s)%s",
+                    entry.name or "?", reason, result.not_found and "" or ", giving up for this match"))
+            end
         else
             local ranks = {}
             for _, playlist in ipairs(PLAYLISTS) do
@@ -412,7 +431,7 @@ local function build_rows(players, playlists, show_mmr, show_games, show_platfor
                     table.insert(cell, { text = games and tostring(math.floor(games)) or "-", color = text })
                 end
             else
-                local symbol = ({ pending = "...", error = "?", none = "", nodata = "-", missing = "..." })[r.kind] or ""
+                local symbol = ({ pending = "...", retry = "...", error = "?", none = "", nodata = "-", missing = "..." })[r.kind] or ""
                 local color = r.kind == "nodata" and rank_color(0) or "#888888"
                 table.insert(cell, { text = symbol, color = color })
                 for _ = 2, lines do table.insert(cell, { text = "", color = color }) end
@@ -739,7 +758,13 @@ tick = function()
     if now >= next_profile_poll then
         next_profile_poll = now + PROFILE_POLL_INTERVAL
         for _, entry in pairs(roster) do
-            if not entry.bot and entry.profile_kind ~= "ok" and entry.profile_kind ~= "error" then
+            if entry.profile_kind == "retry" then
+                -- shows "..." either way, so the table doesn't need rebuilding
+                if now >= entry.retry_at then
+                    entry.profile_kind = "pending"
+                    request_profile(entry)
+                end
+            elseif not entry.bot and entry.profile_kind ~= "ok" and entry.profile_kind ~= "error" then
                 resolve_profile(entry)
                 -- re-request profiles that vanished (e.g. cache cleared by another plugin)
                 local kind = entry.profile_kind
@@ -835,13 +860,13 @@ function plugin.on_settings(ui)
     for _, entry in pairs(roster) do
         count = count + 1
         local kind = entry.profile_kind
-        if not entry.bot and (kind == nil or kind == "pending" or kind == "missing") then pending = pending + 1 end
+        if not entry.bot and (kind == nil or kind == "pending" or kind == "missing" or kind == "retry") then pending = pending + 1 end
     end
     ui.label(string.format("Players tracked: %d (%d profiles loading)", count, pending))
     if ui.button("Refresh ranks (clear profile cache)") then
         hebnix.clear_stats_cache()
         for _, entry in pairs(roster) do
-            entry.profile_kind, entry.ranks, entry.retry_at = nil, nil, nil
+            entry.profile_kind, entry.ranks, entry.retry_at, entry.failures = nil, nil, nil, nil
             request_profile(entry)
         end
         mark_dirty()

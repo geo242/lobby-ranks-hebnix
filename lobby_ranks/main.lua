@@ -230,11 +230,11 @@ local function resolve_profile(entry)
             if delay then
                 kind = "retry"
                 entry.retry_at = hebnix.monotonic_seconds() + delay
-                hebnix.log(string.format("[Lobby Ranks] rank lookup for %s failed (%s), retrying in %d s",
+                hebnix.log(string.format("rank lookup for %s failed (%s), retrying in %d s",
                     entry.name or "?", reason, delay))
             else
                 kind = "error"
-                hebnix.log(string.format("[Lobby Ranks] rank lookup for %s failed (%s)%s",
+                hebnix.log(string.format("rank lookup for %s failed (%s)%s",
                     entry.name or "?", reason, result.not_found and "" or ", giving up for this match"))
             end
         else

@@ -4,6 +4,8 @@ Paste these into the upload form. Upload files:
 - banner: `listing/banner.png` (1600×900)
 - plugin: `dist/lobby_ranks-<version>.zip` (build it with `pwsh ./package.ps1`)
 
+Version history lives in `CHANGELOG.md`, not here.
+
 ## Name
 
 Lobby Ranks
@@ -42,16 +44,3 @@ Notes
 
 Credits
 Written by Geoff Tripoli. Inspired by the BakkesMod plugin Lobby Ranks by GrantJL (Jayden Grant): github.com/GrantJL/rl-lobby-ranks. Its table design is used with his permission.
-
---- Version 1.0.4 ---
-- When a rank lookup fails (a slow or busy profile service, for example), it's now tried again after 20, 40 and 60 seconds instead of showing "?" for the rest of the match. The reason for each failure is written to the Hebnix console.
-
---- Version 1.0.3 ---
-- Outside a match (with the preview off), the plugin now does nothing every frame and doesn't keep the game overlay active, so it no longer costs anything in menus.
-
---- Version 1.0.2 ---
-- Uses much less CPU in matches: player profiles are read once when they load, the lobby is checked a few times a second instead of every frame, and the table is only rebuilt when something in it changes.
-
---- Version 1.0.1 ---
-- Settings: the color sections are now spelled "Table & team colors", "Rank colors" and "Platform colors". Your saved colors are unchanged.
-- Credits: GrantJL, the original plugin's author, has given permission for this port. Thanks, GrantJL!

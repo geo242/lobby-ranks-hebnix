@@ -4,7 +4,7 @@
     python tools/make_banner.py
 
 Uses Segoe UI from C:/Windows/Fonts, the same face the in-game table uses.
-Colours match the plugin defaults in lobby_ranks/main.lua.
+Colors match the plugin defaults in lobby_ranks/main.lua.
 """
 
 from pathlib import Path
@@ -32,7 +32,7 @@ def font(name: str, size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(str(FONTS / name), size)
 
 
-def rank_colour(text: str):
+def rank_color(text: str):
     if text.startswith("SSL"):
         return RANK["SSL"]
     if text.startswith("GC"):
@@ -94,9 +94,9 @@ def main() -> None:
         d.text((tx + 16, by + (block_h - 34) / 2), name, font=cell_b, fill=ACCENT if team == 0 else ORANGE)
         cx = tx + widths[0]
         for (rank, mmr), w in zip(ranks, widths[1:]):
-            colour = rank_colour(rank)
-            d.text((cx + (w - text_w(d, rank, cell_b)) / 2, by + 8), rank, font=cell_b, fill=colour)
-            d.text((cx + (w - text_w(d, mmr, cell)) / 2, by + 46), mmr, font=cell, fill=colour)
+            color = rank_color(rank)
+            d.text((cx + (w - text_w(d, rank, cell_b)) / 2, by + 8), rank, font=cell_b, fill=color)
+            d.text((cx + (w - text_w(d, mmr, cell)) / 2, by + 46), mmr, font=cell, fill=color)
             cx += w
         by += block_h
 

@@ -1,4 +1,5 @@
+plugin_id = "779d3a3904e16ac2be3db48443b1758b"
 name = "Lobby Ranks"
-author = "GrantJL (original BakkesMod plugin), Hebnix port"
-version = "1.0.0"
+author = "Geoff Tripoli"
+version = "1.0.3"
 entry = "main.lua"

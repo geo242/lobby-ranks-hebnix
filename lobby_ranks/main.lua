@@ -1,5 +1,5 @@
 -- Lobby Ranks for Hebnix
--- Port of GrantJL's BakkesMod "Lobby Ranks" plugin (https://github.com/GrantJL/rl-lobby-ranks).
+-- Inspired by GrantJL's BakkesMod "Lobby Ranks" plugin (https://github.com/GrantJL/rl-lobby-ranks).
 -- Shows a table of every player in the current match with their rank, MMR and
 -- games played across a configurable set of playlists.
 --
@@ -10,7 +10,7 @@
 
 local plugin = {}
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.3"
 local P = "lr_" -- settings key prefix
 
 ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ local TIER_SHORT = {
     "GC1", "GC2", "GC3", "SSL",
 }
 
--- rank colour groups: key, label, default, tier range
+-- rank color groups: key, label, default, tier range
 local RANK_GROUPS = {
     { key = "unranked", label = "Unranked",          color = "#b3b3b3", lo = 0,  hi = 0 },
     { key = "bronze",   label = "Bronze",            color = "#ff9900", lo = 1,  hi = 3 },
@@ -91,7 +91,10 @@ local EXAMPLE_PLAYERS = {
 ---------------------------------------------------------------------------
 
 local roster = {}          -- key -> entry
+local roster_count = 0
 local roster_seq = 0
+local roster_gen = 0
+local next_roster_scan = 0
 local match_guid = nil
 local my_id = nil
 local log_key = nil
@@ -102,10 +105,21 @@ local toggled = false      -- toggle bind state (like jlg_lobby_rank_toggle)
 local toggle_was_pressed = false
 local capturing = false
 
-local cached_table = nil   -- built layout
-local cached_preview = nil
-local last_build = -1
-local last_size = ""
+-- Anything that changes what the table shows bumps data_version; the built
+-- layout is only rebuilt when its version is behind (or the screen size changes).
+local data_version = 0
+local live_cache = {}
+local preview_cache = {}
+
+local ROSTER_SCAN_INTERVAL = 0.25 -- UpdateState throttle (seconds)
+local PROFILE_POLL_INTERVAL = 1   -- how often unresolved profiles are polled
+local PROFILE_RETRY_INTERVAL = 5  -- re-request a vanished / never-started profile
+local REBUILD_MIN_INTERVAL = 0.1  -- cap rebuilds while settings are being dragged
+local REBUILD_SAFETY_INTERVAL = 5 -- catch setting changes made outside on_settings
+
+local function mark_dirty()
+    data_version = data_version + 1
+end
 
 ---------------------------------------------------------------------------
 -- Helpers
@@ -174,16 +188,6 @@ local function request_profile(entry)
     entry.request_key = key
 end
 
-local function profile_of(entry)
-    if entry.bot or not entry.request_key then return nil, "none" end
-    local result = hebnix.stats_result(entry.request_key)
-    if result == nil then return nil, "missing" end
-    if result == "pending" then return nil, "pending" end
-    if type(result) ~= "table" then return nil, "missing" end
-    if result.error or result.not_found then return nil, "error" end
-    return result, "ok"
-end
-
 local function rank_for(stats, playlist)
     local ranks = stats and stats.ranks
     if type(ranks) ~= "table" then return nil end
@@ -194,6 +198,47 @@ local function rank_for(stats, playlist)
         if id == playlist.id or (playlist.alt and id == playlist.alt) then return rank end
     end
     return nil
+end
+
+-- stats_result copies the whole tracker profile into fresh Lua tables, so it is
+-- only polled until the profile resolves. The few fields the table needs are
+-- kept on the entry and stats_result is never called for it again.
+local function resolve_profile(entry)
+    if entry.bot or entry.profile_kind == "ok" or entry.profile_kind == "error" then return end
+    local kind
+    if not entry.request_key then
+        kind = "none"
+    else
+        local result = hebnix.stats_result(entry.request_key)
+        if result == nil then
+            kind = "missing"
+        elseif result == "pending" then
+            kind = "pending"
+        elseif type(result) ~= "table" then
+            kind = "missing"
+        elseif result.error or result.not_found then
+            kind = "error"
+        else
+            local ranks = {}
+            for _, playlist in ipairs(PLAYLISTS) do
+                local rank = rank_for(result, playlist)
+                if rank then
+                    ranks[playlist.id] = {
+                        tier_id = tonumber(rank.tier_id),
+                        division_id = tonumber(rank.division_id),
+                        mmr = tonumber(rank.mmr),
+                        matches_played = tonumber(rank.matches_played),
+                    }
+                end
+            end
+            entry.ranks = ranks
+            kind = "ok"
+        end
+    end
+    if kind ~= entry.profile_kind then
+        entry.profile_kind = kind
+        mark_dirty()
+    end
 end
 
 local function rank_text(tier, division, is_casual)
@@ -229,8 +274,10 @@ end
 
 local function reset_roster()
     roster = {}
+    roster_count = 0
     roster_seq = 0
-    cached_table = nil
+    next_roster_scan = 0
+    mark_dirty()
 end
 
 local function update_roster(event)
@@ -238,33 +285,55 @@ local function update_roster(event)
     local players = type(data) == "table" and (data.Players or data.players) or nil
     if type(players) ~= "table" then return end
 
-    local seen = {}
+    -- UpdateState arrives many times a second but the roster rarely changes:
+    -- scan at most every ROSTER_SCAN_INTERVAL unless the player count changed.
+    local now = hebnix.monotonic_seconds()
+    if now < next_roster_scan and #players == roster_count then return end
+    next_roster_scan = now + ROSTER_SCAN_INTERVAL
+
+    roster_gen = roster_gen + 1
+    local changed = false
     for _, player in ipairs(players) do
         local id = tostring(player.PrimaryId or player.primary_id or "")
         local name = tostring(player.Name or player.name or "Unknown")
-        local bot = id == "" or hebnix.is_bot(id)
-        local key = bot and ("bot:" .. name) or id
-        seen[key] = true
-
-        local entry = roster[key]
+        local entry = id ~= "" and roster[id] or nil
         if not entry then
-            roster_seq = roster_seq + 1
-            entry = { order = roster_seq, id = id, name = name, bot = bot }
-            roster[key] = entry
-            local platform = split_primary_id(id)
-            entry.platform = platform or ""
-            request_profile(entry)
+            local bot = id == "" or hebnix.is_bot(id)
+            local key = bot and ("bot:" .. name) or id
+            entry = roster[key]
+            if not entry then
+                roster_seq = roster_seq + 1
+                roster_count = roster_count + 1
+                entry = { order = roster_seq, id = id, name = name, bot = bot }
+                roster[key] = entry
+                local platform = split_primary_id(id)
+                entry.platform = platform or ""
+                request_profile(entry)
+                resolve_profile(entry) -- already cached by another plugin?
+                changed = true
+            end
         end
-        entry.name = name
-        entry.score = tonumber(player.Score or player.score) or 0
+        entry.gen = roster_gen
+
+        local score = tonumber(player.Score or player.score) or 0
         local team = tonumber(player.TeamNum or player.team_num)
-        entry.team = (team == 0 or team == 1) and team or -1
+        team = (team == 0 or team == 1) and team or -1
+        if entry.name ~= name or entry.score ~= score or entry.team ~= team then
+            entry.name, entry.score, entry.team = name, score, team
+            changed = true
+        end
     end
 
-    -- players that left are dropped (the original refreshed on PRI destroy)
-    for key in pairs(roster) do
-        if not seen[key] then roster[key] = nil end
+    -- players that left are dropped (the BakkesMod plugin refreshed on PRI destroy)
+    for key, entry in pairs(roster) do
+        if entry.gen ~= roster_gen then
+            roster[key] = nil
+            roster_count = roster_count - 1
+            changed = true
+        end
     end
+
+    if changed then mark_dirty() end
 end
 
 local function sorted_roster()
@@ -292,8 +361,9 @@ local function poll_local_identity()
     log_key = nil
     if type(info) == "table" and type(info.session) == "table" and info.session.primary_id then
         my_id = tostring(info.session.primary_id)
+        mark_dirty()
     else
-        log_retry_at = now + 10
+        log_retry_at = now + 30
     end
 end
 
@@ -358,7 +428,8 @@ end
 local function live_players()
     local list = {}
     for _, entry in ipairs(sorted_roster()) do
-        local stats, kind = profile_of(entry)
+        local kind = entry.bot and "none" or (entry.profile_kind or "pending")
+        local ranks = entry.ranks
         table.insert(list, {
             name = entry.name,
             team = entry.team,
@@ -367,7 +438,7 @@ local function live_players()
             me = my_id ~= nil and entry.id == my_id,
             rank_lookup = function(playlist)
                 if kind ~= "ok" then return { kind = kind } end
-                local rank = rank_for(stats, playlist)
+                local rank = ranks and ranks[playlist.id]
                 if not rank then return { kind = "nodata" } end
                 return { kind = "ok", rank = rank }
             end,
@@ -395,7 +466,32 @@ local function example_players()
     return list
 end
 
--- measure + lay out a model for a given screen size
+-- hebnix.measure_text builds a DirectWrite format + layout on every call, so
+-- widths are memoized per (size, bold, text). Ranks/MMR/names repeat a lot.
+local measure_cache = {}
+local measure_entries = 0
+
+local function measure(text, size, bold)
+    local by_size = measure_cache[size]
+    if not by_size then
+        by_size = { [true] = {}, [false] = {} }
+        measure_cache[size] = by_size
+    end
+    local by_weight = by_size[bold]
+    local w = by_weight[text]
+    if w then return w end
+    if measure_entries >= 4096 then
+        measure_cache, measure_entries = {}, 0
+        return measure(text, size, bold)
+    end
+    w = hebnix.measure_text(text, size, bold)
+    by_weight[text] = w
+    measure_entries = measure_entries + 1
+    return w
+end
+
+-- measure + lay out a model for a given screen size. Everything draw_model
+-- needs from settings is resolved here so drawing a frame reads no settings.
 local function layout_model(model, h)
     local size = hebnix.get_number(P .. "font_size", 16)
     if hebnix.get_bool(P .. "scale_res", true) then size = size * h / 1080 end
@@ -406,13 +502,13 @@ local function layout_model(model, h)
 
     local widths = {}
     for c, column in ipairs(model.columns) do
-        widths[c] = hebnix.measure_text(column.header, size, true)
+        widths[c] = measure(column.header, size, true)
     end
     for _, block in ipairs(model.blocks) do
         for c, cell in ipairs(block.cells) do
             for _, line in ipairs(cell) do
                 if line.text ~= "" then
-                    local w = hebnix.measure_text(line.text, size, line.bold == true)
+                    local w = measure(line.text, size, line.bold == true)
                     if w > widths[c] then widths[c] = w end
                 end
             end
@@ -435,6 +531,22 @@ local function layout_model(model, h)
     model.block_h = block_h
     model.total_w = total_w
     model.total_h = header_h + block_h * #model.blocks
+
+    local opacity = hebnix.get_number(P .. "bg_opacity", 200)
+    model.px = hebnix.get_number(P .. "pos_x", 50) / 100
+    model.py = hebnix.get_number(P .. "pos_y", 12) / 100
+    model.ax = ANCHOR_FACTOR[hebnix.get_string(P .. "anchor_h", "Center")] or 0.5
+    model.ay = ANCHOR_FACTOR[hebnix.get_string(P .. "anchor_v", "Top")] or 0
+    model.header_bg = with_alpha(setting_color("header_bg"), opacity)
+    model.header_fg = setting_color("header_fg")
+    model.even_bg = with_alpha(setting_color("row_even"), opacity)
+    model.odd_bg = with_alpha(setting_color("row_odd"), opacity)
+    model.stripe_w = math.max(2, math.floor(size * 0.2))
+    for _, block in ipairs(model.blocks) do
+        if block.team == 0 or block.team == 1 then
+            block.stripe = team_color(block.team, false)
+        end
+    end
     return model
 end
 
@@ -453,20 +565,13 @@ end
 
 local function draw_model(draw, model, w, h)
     if not model or #model.columns == 0 then return end
-    local opacity = hebnix.get_number(P .. "bg_opacity", 200)
-
-    local px = hebnix.get_number(P .. "pos_x", 50) / 100
-    local py = hebnix.get_number(P .. "pos_y", 12) / 100
-    local ax = ANCHOR_FACTOR[hebnix.get_string(P .. "anchor_h", "Center")] or 0.5
-    local ay = ANCHOR_FACTOR[hebnix.get_string(P .. "anchor_v", "Top")] or 0
-    local ox = math.floor(w * px - model.total_w * ax)
-    local oy = math.floor(h * py - model.total_h * ay)
+    local ox = math.floor(w * model.px - model.total_w * model.ax)
+    local oy = math.floor(h * model.py - model.total_h * model.ay)
 
     -- header
-    draw.rect(ox, oy, model.total_w, model.header_h,
-        { filled = true, color = with_alpha(setting_color("header_bg"), opacity) })
+    draw.rect(ox, oy, model.total_w, model.header_h, { filled = true, color = model.header_bg })
     local x = ox
-    local header_fg = setting_color("header_fg")
+    local header_fg = model.header_fg
     for c, column in ipairs(model.columns) do
         draw_text_in(draw, x, model.widths[c], oy + model.block_pad, model.line_h,
             { text = column.header, color = header_fg, bold = true },
@@ -475,17 +580,13 @@ local function draw_model(draw, model, w, h)
     end
 
     -- player blocks
-    local even_bg = with_alpha(setting_color("row_even"), opacity)
-    local odd_bg = with_alpha(setting_color("row_odd"), opacity)
-    local stripe_w = math.max(2, math.floor(model.size * 0.2))
     local y = oy + model.header_h
     for b, block in ipairs(model.blocks) do
         draw.rect(ox, y, model.total_w, model.block_h,
-            { filled = true, color = (b % 2 == 1) and even_bg or odd_bg })
+            { filled = true, color = (b % 2 == 1) and model.even_bg or model.odd_bg })
         -- team stripe on the left edge
-        if block.team == 0 or block.team == 1 then
-            draw.rect(ox, y, stripe_w, model.block_h,
-                { filled = true, color = team_color(block.team, false) })
+        if block.stripe then
+            draw.rect(ox, y, model.stripe_w, model.block_h, { filled = true, color = block.stripe })
         end
 
         x = ox
@@ -552,13 +653,62 @@ end
 -- Callbacks
 ---------------------------------------------------------------------------
 
+-- Draw from a cached layout; rebuild only when the data or screen size changed.
+local function draw_overlay(draw, w, h)
+    local preview = hebnix.get_bool(P .. "preview", false)
+    if not preview and next(roster) == nil then return end
+    local cache = preview and preview_cache or live_cache
+
+    local now = hebnix.monotonic_seconds()
+    local size_key = w * 100000 + h
+    local age = now - (cache.built_at or -math.huge)
+    local stale = not cache.model
+        or cache.size_key ~= size_key
+        or age >= REBUILD_SAFETY_INTERVAL
+        or (cache.version ~= data_version and age >= REBUILD_MIN_INTERVAL)
+    if stale then
+        cache.model = rebuild(w, h, preview)
+        cache.version, cache.size_key, cache.built_at = data_version, size_key, now
+    end
+    draw_model(draw, cache.model, w, h)
+end
+
+local function table_visible()
+    if hebnix.get_bool(P .. "preview", false) then return true end
+    if not hebnix.get_bool(P .. "enabled", true) then return false end
+    if next(roster) == nil then return false end
+    if toggled then return true end
+    return hebnix.get_bool(P .. "with_scoreboard", true) and hebnix.is_action_pressed("scoreboard")
+end
+
+-- Hebnix repaints its own windows at the overlay refresh rate for as long as
+-- any plugin defines on_tick or on_overlay while the game runs. So on_overlay
+-- only exists while the table is on screen, and on_tick only while there is a
+-- lobby to watch the scoreboard key for (or a key capture / preview in the
+-- settings). on_tick runs just before the overlay render in the same host
+-- frame, so showing the table adds no lag.
+local function update_overlay_hook()
+    plugin.on_overlay = table_visible() and draw_overlay or nil
+end
+
+local tick -- defined below
+
+local function update_tick_hook()
+    local want = next(roster) ~= nil or capturing or hebnix.get_bool(P .. "preview", false)
+    plugin.on_tick = want and tick or nil
+end
+
 function plugin.on_load()
     hebnix.set(P .. "preview", false)
+    plugin.on_overlay = nil
+    plugin.on_tick = nil
     hebnix.log("Lobby Ranks " .. VERSION .. " loaded")
 end
 
 function plugin.on_unload()
     reset_roster()
+    plugin.on_overlay = nil
+    plugin.on_tick = nil
 end
 
 function plugin.on_game_event(event_type, event)
@@ -576,50 +726,33 @@ function plugin.on_game_event(event_type, event)
         match_guid = nil
         reset_roster()
     end
+    update_tick_hook()
+    update_overlay_hook()
 end
 
-function plugin.on_tick()
+tick = function()
     poll_local_identity()
     poll_toggle_bind()
 
-    -- re-request profiles that vanished (e.g. cache cleared by another plugin)
+    -- poll profiles that haven't resolved yet; resolved ones are never polled again
     local now = hebnix.monotonic_seconds()
     if now >= next_profile_poll then
-        next_profile_poll = now + 2
+        next_profile_poll = now + PROFILE_POLL_INTERVAL
         for _, entry in pairs(roster) do
-            if not entry.bot then
-                local _, kind = profile_of(entry)
-                if kind == "missing" or kind == "none" then request_profile(entry) end
+            if not entry.bot and entry.profile_kind ~= "ok" and entry.profile_kind ~= "error" then
+                resolve_profile(entry)
+                -- re-request profiles that vanished (e.g. cache cleared by another plugin)
+                local kind = entry.profile_kind
+                if (kind == "missing" or kind == "none") and now >= (entry.retry_at or 0) then
+                    entry.retry_at = now + PROFILE_RETRY_INTERVAL
+                    request_profile(entry)
+                end
             end
         end
     end
-end
 
-function plugin.on_overlay(draw, w, h)
-    local now = hebnix.monotonic_seconds()
-    local size_key = w .. "x" .. h
-    local stale = (now - last_build) > 0.5 or size_key ~= last_size
-
-    if hebnix.get_bool(P .. "preview", false) then
-        if stale or not cached_preview then
-            cached_preview = rebuild(w, h, true)
-            last_build, last_size = now, size_key
-        end
-        draw_model(draw, cached_preview, w, h)
-        return
-    end
-
-    if not hebnix.get_bool(P .. "enabled", true) then return end
-    if next(roster) == nil then return end
-
-    local scoreboard = hebnix.get_bool(P .. "with_scoreboard", true) and hebnix.is_action_pressed("scoreboard")
-    if not (toggled or scoreboard) then return end
-
-    if stale or not cached_table then
-        cached_table = rebuild(w, h, false)
-        last_build, last_size = now, size_key
-    end
-    draw_model(draw, cached_table, w, h)
+    update_overlay_hook()
+    update_tick_hook()
 end
 
 local function color_row(ui, key, label, default)
@@ -627,6 +760,10 @@ local function color_row(ui, key, label, default)
 end
 
 function plugin.on_settings(ui)
+    -- settings may change while the panel is open; let the preview follow them
+    mark_dirty()
+    update_tick_hook() -- preview toggled / key capture started on the last frame
+    update_overlay_hook()
     ui.heading("Lobby Ranks")
     ui.checkbox(P .. "enabled", "Enable Lobby Ranks", true)
     ui.checkbox(P .. "with_scoreboard", "Show while the scoreboard is held", true)
@@ -672,7 +809,7 @@ function plugin.on_settings(ui)
     ui.slider(P .. "bg_opacity", "Background opacity", 0, 255, 200)
     ui.space(8)
 
-    ui.collapsing("Table & team colours", function(ui)
+    ui.collapsing("Table & team colors", function(ui)
         color_row(ui, P .. "c_header_bg", "Header background", DEFAULT_COLORS.header_bg)
         color_row(ui, P .. "c_header_fg", "Header text", DEFAULT_COLORS.header_fg)
         color_row(ui, P .. "c_row_even", "Row (even)", DEFAULT_COLORS.row_even)
@@ -682,12 +819,12 @@ function plugin.on_settings(ui)
         color_row(ui, P .. "c_team_orange", "Orange team", DEFAULT_COLORS.team_orange)
         color_row(ui, P .. "c_self", "You", DEFAULT_COLORS.self)
     end)
-    ui.collapsing("Rank colours", function(ui)
+    ui.collapsing("Rank colors", function(ui)
         for _, group in ipairs(RANK_GROUPS) do
             color_row(ui, P .. "rc_" .. group.key, group.label, group.color)
         end
     end)
-    ui.collapsing("Platform colours", function(ui)
+    ui.collapsing("Platform colors", function(ui)
         for _, p in ipairs(PLATFORMS) do
             color_row(ui, P .. "pc_" .. p.key, p.label, p.color)
         end
@@ -697,16 +834,20 @@ function plugin.on_settings(ui)
     local count, pending = 0, 0
     for _, entry in pairs(roster) do
         count = count + 1
-        local _, kind = profile_of(entry)
-        if kind == "pending" or kind == "missing" then pending = pending + 1 end
+        local kind = entry.profile_kind
+        if not entry.bot and (kind == nil or kind == "pending" or kind == "missing") then pending = pending + 1 end
     end
     ui.label(string.format("Players tracked: %d (%d profiles loading)", count, pending))
     if ui.button("Refresh ranks (clear profile cache)") then
         hebnix.clear_stats_cache()
-        for _, entry in pairs(roster) do request_profile(entry) end
+        for _, entry in pairs(roster) do
+            entry.profile_kind, entry.ranks, entry.retry_at = nil, nil, nil
+            request_profile(entry)
+        end
+        mark_dirty()
     end
     ui.space(4)
-    ui.label("Lobby Ranks " .. VERSION .. " - port of GrantJL's BakkesMod plugin")
+    ui.label("Lobby Ranks " .. VERSION .. " - inspired by GrantJL's BakkesMod plugin")
 end
 
 return plugin

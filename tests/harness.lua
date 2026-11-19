@@ -4,6 +4,7 @@ local now = 0
 local draws = {}
 local scoreboard = false
 local bind_down = false
+local calls = { measure = 0, stats = {} }
 
 hebnix = {
     rl_connected = function() return true end,
@@ -14,7 +15,7 @@ hebnix = {
     set = function(k, v) store[k] = v end,
     monotonic_seconds = function() return now end,
     is_bot = function(id) return id == "" or id:lower():find("unknown") ~= nil or not id:find("|", 1, true) end,
-    measure_text = function(t, size, bold) return #t * size * (bold and 0.6 or 0.55) end,
+    measure_text = function(t, size, bold) calls.measure = calls.measure + 1; return #t * size * (bold and 0.6 or 0.55) end,
     is_action_pressed = function(a) return a == "scoreboard" and scoreboard end,
     is_bind_pressed = function(b) return bind_down end,
     capture_bind_async = function() return true end,
@@ -25,6 +26,7 @@ hebnix = {
     fetch_stats_async = function() return true end,
     clear_stats_cache = function() end,
     stats_result = function(key)
+        calls.stats[key] = (calls.stats[key] or 0) + 1
         if key == "epic:222" then return "pending" end
         if key == "psn:333" then return { error = "boom" } end
         return { ranks = {
@@ -48,13 +50,28 @@ plugin.on_load()
 local function frame()
     draws = {}
     now = now + 1
-    plugin.on_tick()
-    plugin.on_overlay(draw, 1920, 1080)
+    -- like the host: on_tick / on_overlay are only called while the plugin defines them
+    if plugin.on_tick then plugin.on_tick() end
+    if plugin.on_overlay then plugin.on_overlay(draw, 1920, 1080) end
     return draws
 end
 
--- 1. no match: nothing drawn
+local function settings_ui(pressed)
+    return setmetatable({}, { __index = function(_, k)
+        if k == "horizontal" or k == "collapsing" then
+            return function(a, b) local f = type(a) == "function" and a or b; f(settings_ui(pressed)) end
+        end
+        if k == "button" then return function(t) return t == pressed end end
+        if k == "combo_box" then return function(key, _, opts) return opts[1] end end
+        return function() end
+    end })
+end
+
+-- 1. no match: nothing drawn, and neither hook is defined (either one keeps
+-- Hebnix repainting at the overlay rate)
 assert(#frame() == 0, "drew with empty roster")
+assert(plugin.on_overlay == nil, "on_overlay defined while nothing is shown")
+assert(plugin.on_tick == nil, "on_tick defined outside a match")
 
 -- 2. match with players
 plugin.on_game_event("UpdateState", { match_guid = "m1", data = { Players = {
@@ -64,10 +81,13 @@ plugin.on_game_event("UpdateState", { match_guid = "m1", data = { Players = {
     { Name = "Bot A", PrimaryId = "Unknown|0|0", TeamNum = 0, Score = 0 },
 } } })
 assert(#frame() == 0, "drew without scoreboard/toggle")
+assert(plugin.on_overlay == nil, "on_overlay defined while the table is hidden")
+assert(plugin.on_tick ~= nil, "on_tick not defined in a match (scoreboard key unwatched)")
 
 scoreboard = true
 local d = frame()
 assert(#d > 0, "nothing drawn with scoreboard held")
+assert(plugin.on_overlay ~= nil, "on_overlay not defined while the table is shown")
 for _, line in ipairs(d) do if line:sub(1, 4) == "text" then print(line) end end
 
 -- expected content checks
@@ -77,6 +97,33 @@ assert(joined:find("SSL"), "SSL missing")
 assert(joined:find("1003"), "mmr missing")
 assert(joined:find("%.%.%."), "pending marker missing")
 assert(joined:find("text %?"), "error marker missing")
+
+-- 2b. resolved profiles are not re-read; unchanged frames don't re-measure text
+local steam_reads, psn_reads = calls.stats["steam:111"], calls.stats["psn:333"]
+local measures = calls.measure
+for _ = 1, 3 do assert(#frame() > 0) end
+assert(calls.stats["steam:111"] == steam_reads, "resolved profile polled again")
+assert(calls.stats["psn:333"] == psn_reads, "failed profile polled again")
+assert(calls.measure == measures, "text re-measured without changes")
+
+-- 2c. repeated UpdateState with the same roster is cheap; a player leaving is seen at once
+local same = { match_guid = "m1", data = { Players = {
+    { Name = "Me",    PrimaryId = "Steam|111|0", TeamNum = 0, Score = 100 },
+    { Name = "EpicG", PrimaryId = "Epic|222|0",  TeamNum = 1, Score = 50 },
+    { Name = "Psn",   PrimaryId = "PS4|333|0",   TeamNum = 1, Score = 70 },
+} } }
+plugin.on_game_event("UpdateState", same)
+now = now + 5 -- force the safety rebuild so the table reflects the roster
+d = frame()
+assert(not table.concat(d, "\n"):find("Bot A"), "player that left still shown")
+plugin.on_game_event("UpdateState", { match_guid = "m1", data = { Players = {
+    { Name = "Me",    PrimaryId = "Steam|111|0", TeamNum = 0, Score = 100 },
+    { Name = "EpicG", PrimaryId = "Epic|222|0",  TeamNum = 1, Score = 50 },
+    { Name = "Psn",   PrimaryId = "PS4|333|0",   TeamNum = 1, Score = 70 },
+    { Name = "Bot A", PrimaryId = "Unknown|0|0", TeamNum = 0, Score = 0 },
+} } })
+d = frame()
+assert(table.concat(d, "\n"):find("Bot A"), "player that joined not shown")
 
 -- 3. platform + casual + all playlists, then preview
 store["lr_show_platform"] = true
@@ -89,14 +136,7 @@ assert(table.concat(d, "\n"):find("812"), "casual mmr missing")
 
 -- 4. toggle bind
 scoreboard = false
-plugin.on_settings(setmetatable({}, { __index = function(_, k)
-    if k == "horizontal" or k == "collapsing" then
-        return function(a, b) local f = type(a) == "function" and a or b; f(setmetatable({}, getmetatable(_ or {}))) end
-    end
-    if k == "button" then return function(t) return t == "Set" end end
-    if k == "combo_box" then return function(key, _, opts) return opts[1] end end
-    return function() end
-end }))
+plugin.on_settings(settings_ui("Set"))
 frame() -- capture completes -> bind f3
 assert(store["lr_toggle_bind"] == "f3", "bind not captured")
 bind_down = true; frame(); bind_down = false; frame() -- press is ignored (it set the bind)
@@ -107,7 +147,9 @@ assert(#d == 0, "toggle did not hide table")
 
 -- 5. preview works out of match
 plugin.on_game_event("GameLeft", {})
+assert(plugin.on_tick == nil and plugin.on_overlay == nil, "hooks kept after leaving the match")
 store["lr_preview"] = true
+plugin.on_settings(settings_ui())
 d = frame()
 assert(table.concat(d, "\n"):find("Sierra"), "preview missing")
 
@@ -116,6 +158,7 @@ store["lr_preview"] = false
 store["lr_enabled"] = false
 scoreboard = true
 assert(#frame() == 0)
+assert(plugin.on_tick == nil and plugin.on_overlay == nil, "hooks kept after the preview closed")
 
 print("ALL TESTS PASSED")
 

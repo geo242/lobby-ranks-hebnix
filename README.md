@@ -25,6 +25,10 @@ The Rocket League Stats API must be enabled. Hebnix can do this for you.
 | Canvas `FillBox` / `DrawString` | `draw.rect` / `draw.text` / `draw.line` in `on_overlay` |
 | ImGui settings + `config.json` | `on_settings(ui)` controls (saved automatically) |
 
+## Credits
+
+The original BakkesMod Lobby Ranks is by [GrantJL (Jayden Grant)](https://github.com/GrantJL/rl-lobby-ranks). This is an independent Lua rewrite for Hebnix that follows the original's design. GrantJL has been contacted about the port through a GitHub issue on the original repo. If they object, it will be taken down.
+
 ## Development
 
 - **Run the tests:**
@@ -33,6 +37,11 @@ The Rocket League Stats API must be enabled. Hebnix can do this for you.
 
   The tests run the plugin against a mocked Hebnix host in Lua 5.4, the same Lua version Hebnix embeds.
 - **Build the upload zip:** `pwsh ./package.ps1`. This writes `dist/lobby_ranks-<version>.zip`. Add `-Install` to also copy the plugin into your Hebnix plugins folder.
+- **Regenerate the portal banner:**
+  - `python -m pip install pillow`
+  - `python tools/make_banner.py`
+
+  This writes `listing/banner.png`. The portal listing text is in `listing/listing.md`.
 - **Release a new version:** bump `version` in `plugin.toml` for each upload. After the first upload, add the `plugin_id` the Hebnix portal assigns to `plugin.toml`. Hebnix uses that ID to match updates.
 
 Differences from the original:

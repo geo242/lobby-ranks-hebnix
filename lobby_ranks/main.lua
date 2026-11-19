@@ -184,7 +184,7 @@ local function request_profile(entry)
     if entry.bot then return end
     local platform, account = split_primary_id(entry.id)
     local key
-    if platform and PROFILE_PLATFORM[platform] then
+    if platform and account and PROFILE_PLATFORM[platform] then
         key = hebnix.fetch_profile_async(PROFILE_PLATFORM[platform], account)
     elseif entry.id ~= "" then
         hebnix.fetch_stats_async(entry.id, entry.name or "")

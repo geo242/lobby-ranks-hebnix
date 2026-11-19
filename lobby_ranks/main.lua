@@ -10,7 +10,7 @@
 
 local plugin = {}
 
-local VERSION = "2.0.0"
+local VERSION = "1.0.0"
 local P = "lr_" -- settings key prefix
 
 ---------------------------------------------------------------------------

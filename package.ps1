@@ -1,4 +1,4 @@
-# Builds the zip to upload to the Hebnix plugin portal, e.g. dist\lobby_ranks-2.0.0.zip
+# Builds the zip to upload to the Hebnix plugin portal, e.g. dist\lobby_ranks-1.0.0.zip
 # Hebnix extracts catalog zips straight into its plugins folder, so the zip
 # must contain one top-level plugin folder: lobby_ranks/plugin.toml, lobby_ranks/main.lua
 #
